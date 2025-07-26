@@ -1,7 +1,7 @@
 variable "location" {
   description = "location for resources"
   type        = string
-  default     = "us-east-1"
+  default     = "eastus"
 
 }
 
