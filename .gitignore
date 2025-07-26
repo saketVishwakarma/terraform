@@ -1,0 +1,25 @@
+# Ignore Terraform state files
+*.tfstate
+*.tfstate.*
+
+# Crash log
+crash.log
+
+# Terraform variable files
+*.tfvars
+
+# Terraform plan output
+*.tfplan
+
+# Sensitive keys
+*.pem
+*.key
+
+# Local override files
+.terraform/
+terraform.tfvars
+
+# IDE & OS specific
+.vscode/
+*.DS_Store
+.idea/
