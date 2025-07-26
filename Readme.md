@@ -1,95 +1,151 @@
-# Azure VM Deployment with Terraform & GitHub Actions
+# Deploy Azure VM Using Terraform & GitHub Actions with OIDC
 
-This project shows how to deploy a simple Virtual Machine in Microsoft Azure using Terraform. The deployment is automated using GitHub Actions, and all sensitive information like credentials and SSH keys are managed securely.
-
----
-
-## 📁 Project Overview
-
-This repository contains everything needed to:
-- Provision an Azure Virtual Machine
-- Use GitHub Actions for CI/CD
-- Follow Terraform best practices (e.g., remote secrets, clean structure)
-- Avoid committing any sensitive files or credentials
+This project shows how to deploy a basic virtual machine on Microsoft Azure using Terraform, and automate the deployment with GitHub Actions. The workflow uses OpenID Connect (OIDC) to securely authenticate to Azure—without storing secrets in your code or GitHub.
 
 ---
 
-## 🔐 Security First
-
-- Secrets like SSH keys and service principal credentials are stored securely in **GitHub Secrets**
-- `terraform.tfvars` is excluded using `.gitignore`
-- All sensitive variables (passwords, keys) are marked `sensitive = true`
-- SSH is used to access the VM — password login is disabled
-
----
-
-## 🧰 Prerequisites
-
-Make sure you have:
-- An Azure subscription
-- A GitHub account with access to create secrets
-- Terraform installed (only for local testing)
+## 🔧 What This Project Does
+- Provisions an Azure virtual machine with a network setup
+- Uses GitHub Actions to run Terraform (`init`, `plan`, `apply`, `destroy`)
+- Authenticates to Azure using GitHub OIDC (no service principal secrets required)
+- Demonstrates how to securely manage credentials and automate infrastructure
 
 ---
 
-## ☁️ Azure Setup
+## ✅ What You Need Before You Start
+- Azure subscription
+- A GitHub repository (this repo or your own fork)
+- Azure CLI installed (only for the initial setup)
+
+---
+
+## ⚙️ One-Time Setup on Azure
 
 ### Step 1: Create a Service Principal
-Use the Azure CLI to create a service principal that Terraform can use:
-
+Run the following in your terminal:
 ```bash
 az login
-az ad sp create-for-rbac --name "yourusername" --role="Contributor" \
-  --scopes="/subscriptions/<your-subscription-id>" --sdk-auth
+az ad sp create --name "terraform-gh-action" --role contributor \
+  --scopes "/subscriptions/<YOUR_SUBSCRIPTION_ID>"
 ```
-
-Copy the entire JSON output and save it as a GitHub Secret named:
-```
-AZURE_CREDENTIALS
-```
+Save the following values:
+- `appId` → used as `AZURE_CLIENT_ID`
+- `tenant` → used as `AZURE_TENANT_ID`
+- Your subscription ID → used as `AZURE_SUBSCRIPTION_ID`
 
 ---
 
-### Step 2: Generate an SSH Key
-If you don’t already have an SSH key:
+### Step 2: Link GitHub to Azure with Federated Identity
+1. Go to **Azure Portal > Azure Active Directory > App Registrations**
+2. Select the service principal you just created
+3. Open **Federated credentials** → click **Add credential**
+4. Fill the fields:
+   - **Name**: `terraform-gh-main`
+   - **Entity Type**: `Repository`
+   - **Entity Name**: `your-org/your-repo`
+   - **Subject**: `repo:your-org/your-repo:ref:refs/heads/main`
+   - **Issuer**: `https://token.actions.githubusercontent.com`
+   - **Audience**: `api://AzureADTokenExchange`
 
-```bash
-ssh-keygen -t rsa -b 4096 -C "azureuser@vm"
+---
+
+### Step 3: Add Secrets to Your GitHub Repo
+In GitHub → Settings → Secrets → Actions → New repository secret:
+
+| Name                      | Value                          |
+|---------------------------|---------------------------------|
+| `AZURE_CLIENT_ID`         | Your appId                     |
+| `AZURE_TENANT_ID`         | Your tenant ID                 |
+| `AZURE_SUBSCRIPTION_ID`   | Your Azure subscription ID     |
+| `TF_VAR_admin_username`   | e.g. `azureuser`               |
+| `TF_VAR_ssh_public_key`   | Your SSH public key            |
+| `TF_VAR_vnet_address_space` | e.g. `["10.0.0.0/16"]`       |
+| `TF_VAR_subnet_prefix`      | e.g. `["10.0.2.0/24"]`       |
+
+---
+
+## 📁 Terraform Setup
+
+### `provider.tf`
+```hcl
+provider "azurerm" {
+  features {}
+}
+```
+> No credentials are hardcoded. Everything is passed through environment variables.
+
+### Backend (Optional)
+If using remote state storage:
+```hcl
+terraform {
+  backend "azurerm" {
+    resource_group_name  = "example-rg"
+    storage_account_name = "examplestorage"
+    container_name       = "tfstate"
+    key                  = "terraform.tfstate"
+  }
+
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "=3.112.0"
+    }
+  }
+}
+```
+> Your service principal must have access to these backend resources.
+
+---
+
+## 🧪 GitHub Actions Workflow
+
+### Why We Pass `ARM_` Environment Variables
+Each step in GitHub Actions runs in a new shell. If you don’t pass the `ARM_*` environment variables in every Terraform step, Terraform falls back to Azure CLI, which doesn’t work with OIDC.
+
+### Example Environment Block
+```yaml
+env:
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  ARM_USE_OIDC: true
 ```
 
-This creates:
-- A private key: `~/.ssh/id_rsa`
-- A public key: `~/.ssh/id_rsa.pub`
+### Example Workflow Steps
 
-Add the public key content as a GitHub secret:
-- `TF_VAR_ssh_public_key`
+#### Terraform Init
+```yaml
+- name: Terraform Init
+  run: terraform init
+  env: *arm_env
+```
 
-Also set:
-- `TF_VAR_admin_username` → usually `azureuser`
-- `TF_VAR_vnet_address_space` → e.g., `["10.0.0.0/18"]`
-- `TF_VAR_subnet_prefix` → e.g., `["10.0.2.0/28"]`
+#### Terraform Plan
+```yaml
+- name: Terraform Plan
+  run: terraform plan
+  env: *arm_env
+```
+
+#### Terraform Apply
+```yaml
+- name: Terraform Apply
+  run: terraform apply -auto-approve
+  env: *arm_env
+```
+
+#### Terraform Destroy
+```yaml
+- name: Terraform Destroy
+  run: terraform destroy -auto-approve
+  env: *arm_env
+```
+
+> Tip: You can use YAML anchors like `*arm_env` to avoid repeating the same environment block if you want.
 
 ---
 
-## ⚙️ GitHub Actions Workflow Explained
-
-The workflow is defined in `.github/workflows/terraform.yml`. It’s designed to be manually triggered and supports both deployment and teardown.
-
-### What It Does:
-- Checks out the code
-- Logs into Azure using your GitHub secret
-- Sets up Terraform v1.6.6
-- Runs `terraform init`, `fmt`, and `validate`
-- Executes a plan to show what will change
-- Based on input, either **applies** or **destroys** the infrastructure
-
-You can trigger this from the GitHub Actions tab with a single click.
-
----
-
-## 🚀 Running Locally (Optional)
-
-You can test locally using the CLI:
+## 🧪 Running Terraform Locally (Optional)
 ```bash
 export TF_VAR_admin_username="azureuser"
 export TF_VAR_ssh_public_key="$(cat ~/.ssh/id_rsa.pub)"
@@ -98,35 +154,36 @@ terraform plan
 terraform apply
 ```
 
-Do **not** commit your `.tfvars` file or any key material.
-
 ---
 
-## 📦 Outputs
-After deployment, Terraform prints useful info like:
+## 🔄 Terraform Outputs
+After successful deployment, you can output details like:
+- VM name and IP
 - Resource group name
-- Private IP address of the VM
-- VM and NIC resource IDs
+- NIC or subnet ID
+
+Add these in your `outputs.tf` file as needed.
 
 ---
 
-## ✅ Summary
-
-| What Was Done                      | Done? |
-|-----------------------------------|-------|
-| Secure credential storage         | ✅     |
-| GitHub Actions automation         | ✅     |
-| No hardcoded secrets or passwords | ✅     |
-| SSH-only VM login                 | ✅     |
-| Clean and modular setup           | ✅     |
+## ✅ Recap Checklist
+| Task                                        | Done? |
+|---------------------------------------------|--------|
+| OIDC login set up with federated identity   | ✅     |
+| GitHub secrets securely configured          | ✅     |
+| Terraform workflow fully automated          | ✅     |
+| SSH key used for VM access                  | ✅     |
+| No sensitive credentials exposed            | ✅     |
 
 ---
+
+## 👨‍💻 Notes
+This setup helps you manage infrastructure with confidence. OIDC keeps your secrets secure, GitHub Actions automates your deployments, and Terraform ensures your Azure resources are consistent.
+
+You can extend this project with storage accounts, databases, or convert it into a module or template as needed.
+-
 
 ## 👤 Author
 Saket Kumar Vishwakarma  
 System Engineer at TCS  
 DevOps | Cloud | Automation Enthusiast
-
----
-
-Let me know if you want help adding storage, databases, or making this a reusable module for other teams.
